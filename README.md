@@ -19,13 +19,18 @@ Built with GTK4 and libadwaita for GNOME on Ubuntu/Debian. Once the package is i
 
 ## Install
 
-Download the latest `.deb` from [Releases](https://github.com/Hafij-DEU/laptop-keyboard-toggle/releases), then run:
+Run this command. It downloads the latest release and installs it. Run the same command again later to update.
 
 ```bash
-sudo apt install ./toggle-internal-keyboard_*_all.deb
+url=$(curl -fsSL https://api.github.com/repos/Hafij-DEU/laptop-keyboard-toggle/releases/latest | grep -o 'https://[^"]*_all\.deb' | head -1) && curl -fL "$url" -o /tmp/toggle-internal-keyboard.deb && sudo apt install -y /tmp/toggle-internal-keyboard.deb
 ```
 
-Open **Toggle Internal Keyboard** from the app grid.
+Then open **Toggle Internal Keyboard** from the app grid.
+
+Other ways to install:
+
+- **App Hub:** if you use [App Hub](https://github.com/Hafij-DEU/Application-hub), install it from the My Apps list. App Hub also handles updates.
+- **By hand:** download the `.deb` from [Releases](https://github.com/Hafij-DEU/laptop-keyboard-toggle/releases), then run `sudo apt install ./toggle-internal-keyboard_*_all.deb`.
 
 The installer enables the stuck-Shift service. To turn it off, use the switch in the app or run `internal-keyboard watchdog off`.
 
