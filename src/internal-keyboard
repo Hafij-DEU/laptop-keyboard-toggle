@@ -2,7 +2,7 @@
 """Toggle Internal Keyboard: turn the laptop's built-in keyboard on or off.
 
 Usage:
-  internal-keyboard                      open the window
+  internal-keyboard [--minimized]        open the window
   internal-keyboard status               print "on" or "off"
   internal-keyboard on|off|toggle [--notify]
   internal-keyboard watchdog on|off|status   auto-reset when Shift gets stuck
@@ -18,12 +18,13 @@ import time
 
 APP_ID = "io.github.hafij_bge.ToggleInternalKeyboard"
 APP_NAME = "Toggle Internal Keyboard"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 WATCHDOG_UNIT = "toggle-internal-keyboard-watchdog.service"
 HELPER = os.environ.get("TIK_HELPER", "/usr/libexec/toggle-internal-keyboard/helper")
 SYSFS = os.environ.get("TIK_SYSFS", "/sys/class/input")
-CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
-                      "toggle-internal-keyboard", "settings.json")
+CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+CONFIG = os.path.join(CONFIG_HOME, "toggle-internal-keyboard", "settings.json")
+AUTOSTART = os.path.join(CONFIG_HOME, "autostart", APP_ID + ".desktop")
 
 INTERNAL_NAMES = ("AT Translated Set 2 keyboard", "AT Raw Set 2 keyboard")
 # Linux key codes for Q, A, Z and Space: a device with all of them is a real keyboard.
@@ -187,9 +188,38 @@ def save_settings(data):
         pass
 
 
+def autostart_state():
+    """Return (enabled, minimized) from the login autostart entry."""
+    try:
+        with open(AUTOSTART) as f:
+            text = f.read()
+    except OSError:
+        return False, False
+    enabled = "X-GNOME-Autostart-enabled=false" not in text and "Hidden=true" not in text
+    return enabled, "--minimized" in text
+
+
+def set_autostart(enabled, minimized):
+    if not enabled:
+        try:
+            os.remove(AUTOSTART)
+        except FileNotFoundError:
+            pass
+        return
+    os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
+    with open(AUTOSTART, "w") as f:
+        f.write("[Desktop Entry]\n"
+                "Type=Application\n"
+                f"Name={APP_NAME}\n"
+                f"Exec=internal-keyboard{' --minimized' if minimized else ''}\n"
+                f"Icon={APP_ID}\n"
+                "X-GNOME-Autostart-enabled=true\n")
+
+
 # ---------------------------------------------------------------- GUI
 
 def gui(argv):
+    minimized = "--minimized" in argv
     import gi
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
@@ -249,6 +279,18 @@ def gui(argv):
             self.watchdog_row.set_active(watchdog_enabled())
             self.watchdog_handler = self.watchdog_row.connect("notify::active", self.on_watchdog)
             group.add(self.watchdog_row)
+
+            login, mini = autostart_state()
+            self.login_row = Adw.SwitchRow(title="Open at login")
+            self.login_row.set_active(login)
+            self.min_row = Adw.SwitchRow(title="Start minimized",
+                                         subtitle="When opened at login")
+            self.min_row.set_active(mini)
+            self.min_row.set_sensitive(login)
+            self.login_row.connect("notify::active", self.on_autostart)
+            self.min_row.connect("notify::active", self.on_autostart)
+            group.add(self.login_row)
+            group.add(self.min_row)
 
             self.others_row = Adw.ActionRow(title="Other keyboards")
             self.others_row.set_subtitle_lines(3)
@@ -333,6 +375,14 @@ def gui(argv):
 
             self.app.run_helper("watchdog-on" if want else "watchdog-off", done)
 
+        def on_autostart(self, *_):
+            login = self.login_row.get_active()
+            self.min_row.set_sensitive(login)
+            try:
+                set_autostart(login, self.min_row.get_active())
+            except OSError as e:
+                self.toasts.add_toast(Adw.Toast(title=f"Could not save: {e.strerror}", timeout=4))
+
         def on_auto_changed(self, *_):
             data = load_settings()
             data["auto_on_seconds"] = self.auto_on_seconds()
@@ -385,6 +435,7 @@ def gui(argv):
             self.auto_on_deadline = None
             self.held = False
             self.tick = 0
+            self.start_minimized = minimized
 
         def do_startup(self):
             Adw.Application.do_startup(self)
@@ -396,8 +447,12 @@ def gui(argv):
             self.set_accels_for_action("window.close", ["<Ctrl>w"])
 
         def do_activate(self):
+            first = self.get_active_window() is None
             win = self.get_active_window() or Window(self)
             win.present()
+            if first and self.start_minimized:
+                self.start_minimized = False
+                GLib.timeout_add(400, lambda: win.minimize() and False)
             if not self.tick:
                 self.tick = GLib.timeout_add_seconds(1, self.on_tick)
 

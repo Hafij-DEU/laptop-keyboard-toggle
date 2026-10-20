@@ -12,6 +12,7 @@ Built with GTK4 and libadwaita for GNOME on Ubuntu/Debian. Once the package is i
 - **Turn back on automatically** after 1, 5 or 15 minutes, or 1 hour. This still works after you close the window.
 - **Safety check:** if no other keyboard is connected, the app asks before turning the built-in one off, because then only the mouse or touchpad can turn it back on.
 - **Stuck Shift fix:** a small background service watches for a Shift key that stays down after you let go. It resets the keyboard to release it. If Shift sticks again within a minute, the service turns the keyboard off and notifies you.
+- **Open at login:** the app can start when you log in, either as a normal window or minimized.
 - **Quick toggle:** right-click the app icon and choose **Toggle Now** to switch without opening a window.
 - **Command line:** `internal-keyboard on|off|toggle|status`.
 - **Survives reboots and kernel updates:** the app finds the keyboard by its hardware port (`isa0060/serio0`), not by a fixed `eventN` number, which can change.
@@ -38,7 +39,7 @@ The installer enables the stuck-Shift service. To turn it off, use the switch in
 ## Command line
 
 ```text
-internal-keyboard                          open the window
+internal-keyboard [--minimized]            open the window
 internal-keyboard status                   print "on" or "off"
 internal-keyboard on|off|toggle [--notify] change the keyboard state
 internal-keyboard watchdog on|off|status   stuck-Shift auto-fix
