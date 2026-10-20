@@ -1,0 +1,497 @@
+#!/usr/bin/python3
+"""Toggle Internal Keyboard: turn the laptop's built-in keyboard on or off.
+
+Usage:
+  internal-keyboard                      open the window
+  internal-keyboard status               print "on" or "off"
+  internal-keyboard on|off|toggle [--notify]
+  internal-keyboard watchdog on|off|status   auto-reset when Shift gets stuck
+"""
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+APP_ID = "io.github.hafij_bge.ToggleInternalKeyboard"
+APP_NAME = "Toggle Internal Keyboard"
+VERSION = "1.1.0"
+WATCHDOG_UNIT = "toggle-internal-keyboard-watchdog.service"
+HELPER = os.environ.get("TIK_HELPER", "/usr/libexec/toggle-internal-keyboard/helper")
+SYSFS = os.environ.get("TIK_SYSFS", "/sys/class/input")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                      "toggle-internal-keyboard", "settings.json")
+
+INTERNAL_NAMES = ("AT Translated Set 2 keyboard", "AT Raw Set 2 keyboard")
+# Linux key codes for Q, A, Z and Space: a device with all of them is a real keyboard.
+LETTER_KEYS = (16, 30, 44, 57)
+AUTO_ON_CHOICES = [("Never", 0), ("After 1 minute", 60), ("After 5 minutes", 300),
+                   ("After 15 minutes", 900), ("After 1 hour", 3600)]
+
+
+# ---------------------------------------------------------------- device logic
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _input_dirs():
+    def num(p):
+        m = re.search(r"(\d+)$", p)
+        return int(m.group(1)) if m else 0
+    return sorted(glob.glob(os.path.join(SYSFS, "input*")), key=num)
+
+
+def _is_virtual(d):
+    return "/virtual/" in os.path.realpath(d)
+
+
+def find_internal():
+    """Return the sysfs dir of the built-in keyboard, or None."""
+    for d in _input_dirs():
+        if not os.path.exists(os.path.join(d, "inhibited")) or _is_virtual(d):
+            continue
+        if (_read(os.path.join(d, "phys")).startswith("isa0060/serio0")
+                or _read(os.path.join(d, "name")) in INTERNAL_NAMES):
+            return d
+    return None
+
+
+def read_state():
+    """Return (device_dir, device_name, enabled). enabled is None if not found."""
+    d = find_internal()
+    if not d:
+        return None, None, None
+    return d, _read(os.path.join(d, "name")), _read(os.path.join(d, "inhibited")) == "0"
+
+
+def _has_letter_keys(caps):
+    bits = 0
+    for word in caps.split():
+        bits = (bits << 64) | int(word, 16)
+    return all(bits >> k & 1 for k in LETTER_KEYS)
+
+
+def other_keyboards(internal):
+    """Names of other physical keyboards (USB, Bluetooth, ...)."""
+    names = []
+    for d in _input_dirs():
+        if d == internal or _is_virtual(d):
+            continue
+        try:
+            if _has_letter_keys(_read(os.path.join(d, "capabilities", "key"))):
+                names.append(_read(os.path.join(d, "name")) or os.path.basename(d))
+        except ValueError:
+            pass
+    return names
+
+
+def helper_argv(mode):
+    if os.environ.get("TIK_NO_PKEXEC"):
+        return [HELPER, mode]
+    return ["pkexec", HELPER, mode]
+
+
+def watchdog_enabled():
+    p = subprocess.run(["systemctl", "is-enabled", WATCHDOG_UNIT],
+                       capture_output=True, text=True)
+    return p.stdout.strip() == "enabled"
+
+
+def explain_failure(status, err):
+    if status in (126, 127):
+        return "Permission was not granted"
+    return (err or "").strip() or f"Helper failed (exit {status})"
+
+
+# ---------------------------------------------------------------- command line
+
+def notify(text):
+    if shutil.which("notify-send"):
+        subprocess.run(["notify-send", "-a", APP_NAME, "-i", "input-keyboard",
+                        "-h", "string:x-canonical-private-synchronous:tik", APP_NAME, text],
+                       check=False)
+
+
+def cli(argv):
+    args = [a for a in argv if not a.startswith("--")]
+    flags = {a for a in argv if a.startswith("--")}
+    if "--version" in flags:
+        print(VERSION)
+        return 0
+    if "--help" in flags or "-h" in argv:
+        print(__doc__.strip())
+        return 0
+    cmd = args[0]
+    if cmd == "watchdog":
+        sub = args[1] if len(args) > 1 else "status"
+        if sub == "status":
+            print("on" if watchdog_enabled() else "off")
+            return 0
+        if sub not in ("on", "off"):
+            print(__doc__.strip(), file=sys.stderr)
+            return 2
+        p = subprocess.run(helper_argv("watchdog-" + sub), capture_output=True, text=True)
+        if p.returncode != 0:
+            print(explain_failure(p.returncode, p.stderr), file=sys.stderr)
+            return p.returncode
+        print("on" if watchdog_enabled() else "off")
+        return 0
+    if cmd == "status":
+        _, _, enabled = read_state()
+        if enabled is None:
+            print("internal keyboard not found", file=sys.stderr)
+            return 3
+        print("on" if enabled else "off")
+        return 0
+    if cmd not in ("on", "off", "toggle"):
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    p = subprocess.run(helper_argv(cmd), capture_output=True, text=True)
+    if p.returncode != 0:
+        msg = explain_failure(p.returncode, p.stderr)
+        print(msg, file=sys.stderr)
+        if "--notify" in flags:
+            notify(msg)
+        return p.returncode
+    new = p.stdout.strip()
+    print(new)
+    if "--notify" in flags:
+        notify("Internal keyboard is on" if new == "on" else "Internal keyboard is off")
+    return 0
+
+
+# ---------------------------------------------------------------- settings
+
+def load_settings():
+    try:
+        with open(CONFIG) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data):
+    try:
+        os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+        with open(CONFIG, "w") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------- GUI
+
+def gui(argv):
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gio, GLib, Gtk
+
+    CSS = b"""
+    .kb-off .icon { color: @error_color; }
+    .kb-on .icon { color: @accent_color; }
+    .big-pill { padding: 12px 40px; font-size: 1.15em; }
+    """
+
+    class Window(Adw.ApplicationWindow):
+        def __init__(self, app):
+            super().__init__(application=app, title=APP_NAME)
+            self.app = app
+            self.set_default_size(440, 720)
+            self.busy = False
+
+            provider = Gtk.CssProvider()
+            provider.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_display(
+                self.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+            menu = Gio.Menu()
+            menu.append("About Toggle Internal Keyboard", "app.about")
+            menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu,
+                                      tooltip_text="Main Menu")
+            header = Adw.HeaderBar()
+            header.pack_end(menu_btn)
+
+            self.status = Adw.StatusPage(icon_name="input-keyboard-symbolic")
+            self.status.set_vexpand(True)
+
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+            self.button = Gtk.Button(halign=Gtk.Align.CENTER)
+            self.button.add_css_class("pill")
+            self.button.add_css_class("big-pill")
+            self.button.connect("clicked", self.on_button)
+            box.append(self.button)
+
+            group = Adw.PreferencesGroup()
+            self.auto_row = Adw.ComboRow(
+                title="Turn back on automatically",
+                subtitle="Only while this app is running",
+                model=Gtk.StringList.new([c[0] for c in AUTO_ON_CHOICES]))
+            saved = load_settings().get("auto_on_seconds", 0)
+            for i, (_, secs) in enumerate(AUTO_ON_CHOICES):
+                if secs == saved:
+                    self.auto_row.set_selected(i)
+            self.auto_row.connect("notify::selected", self.on_auto_changed)
+            group.add(self.auto_row)
+
+            self.watchdog_row = Adw.SwitchRow(
+                title="Fix stuck Shift automatically",
+                subtitle="Resets the keyboard when Shift stays held with no key pressed. "
+                         "Turns it off if it happens again within a minute.")
+            self.watchdog_row.set_active(watchdog_enabled())
+            self.watchdog_handler = self.watchdog_row.connect("notify::active", self.on_watchdog)
+            group.add(self.watchdog_row)
+
+            self.others_row = Adw.ActionRow(title="Other keyboards")
+            self.others_row.set_subtitle_lines(3)
+            group.add(self.others_row)
+
+            self.device_row = Adw.ActionRow(title="Built-in keyboard")
+            self.device_row.add_css_class("property")
+            group.add(self.device_row)
+            box.append(group)
+
+            clamp = Adw.Clamp(maximum_size=420, child=box)
+            self.status.set_child(clamp)
+
+            self.toasts = Adw.ToastOverlay(child=self.status)
+            view = Adw.ToolbarView(content=self.toasts)
+            view.add_top_bar(header)
+            self.set_content(view)
+
+            self.refresh()
+            self.connect("close-request", self.on_close)
+
+        # -- state
+
+        def refresh(self):
+            dev, name, enabled = read_state()
+            app = self.app
+            if enabled is None:
+                self.status.set_title("Keyboard not found")
+                self.status.set_description(
+                    "No built-in (i8042) keyboard was found on this computer.")
+                self.button.set_visible(False)
+                self.device_row.set_subtitle("—")
+                self.others_row.set_subtitle(", ".join(other_keyboards(None)) or "None")
+                return
+            self.button.set_visible(True)
+            self.button.set_sensitive(not self.busy)
+            for c in ("kb-on", "kb-off", "destructive-action", "suggested-action"):
+                self.status.remove_css_class(c)
+                self.button.remove_css_class(c)
+            if enabled:
+                app.cancel_auto_on()
+                self.status.set_title("Keyboard is on")
+                self.status.set_description("The laptop keyboard is working.")
+                self.status.add_css_class("kb-on")
+                self.button.set_label("Turn Off")
+                self.button.add_css_class("destructive-action")
+            else:
+                self.status.set_title("Keyboard is off")
+                left = app.auto_on_remaining()
+                if left is not None:
+                    m, s = divmod(left, 60)
+                    self.status.set_description(f"Turns back on in {m}:{s:02d}.")
+                else:
+                    self.status.set_description("Key presses on the laptop keyboard are ignored.")
+                self.status.add_css_class("kb-off")
+                self.button.set_label("Turn On")
+                self.button.add_css_class("suggested-action")
+            self.device_row.set_subtitle(f"{name} ({os.path.basename(dev)})")
+            others = other_keyboards(dev)
+            self.others_row.set_subtitle(
+                "\n".join(others) if others
+                else "None found. Use the mouse or touchpad to turn the keyboard back on.")
+
+        def auto_on_seconds(self):
+            return AUTO_ON_CHOICES[self.auto_row.get_selected()][1]
+
+        # -- actions
+
+        def on_watchdog(self, row, _pspec):
+            want = row.get_active()
+            row.set_sensitive(False)
+
+            def done(ok, msg):
+                row.set_sensitive(True)
+                actual = watchdog_enabled()
+                if actual != row.get_active():
+                    row.handler_block(self.watchdog_handler)
+                    row.set_active(actual)
+                    row.handler_unblock(self.watchdog_handler)
+                if not ok:
+                    self.toasts.add_toast(Adw.Toast(title=msg, timeout=4))
+
+            self.app.run_helper("watchdog-on" if want else "watchdog-off", done)
+
+        def on_auto_changed(self, *_):
+            data = load_settings()
+            data["auto_on_seconds"] = self.auto_on_seconds()
+            save_settings(data)
+
+        def on_button(self, _btn):
+            dev, _, enabled = read_state()
+            if enabled is None:
+                return
+            if not enabled:
+                self.run("on")
+                return
+            if other_keyboards(dev):
+                self.run("off")
+                return
+            dlg = Adw.AlertDialog(
+                heading="No other keyboard found",
+                body="You will only have the mouse or touchpad to turn the keyboard back on.")
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("off", "Turn Off")
+            dlg.set_response_appearance("off", Adw.ResponseAppearance.DESTRUCTIVE)
+            dlg.set_default_response("cancel")
+            dlg.set_close_response("cancel")
+            dlg.connect("response", lambda _d, r: r == "off" and self.run("off"))
+            dlg.present(self)
+
+        def run(self, mode):
+            self.busy = True
+            self.button.set_sensitive(False)
+
+            def done(ok, msg):
+                self.busy = False
+                if ok and mode == "off" and self.auto_on_seconds():
+                    self.app.schedule_auto_on(self.auto_on_seconds())
+                if not ok:
+                    self.toasts.add_toast(Adw.Toast(title=msg, timeout=4))
+                self.refresh()
+
+            self.app.run_helper(mode, done)
+
+        def on_close(self, _w):
+            if self.app.auto_on_remaining() is not None:
+                self.app.hold_until_auto_on()
+            return False
+
+    class App(Adw.Application):
+        def __init__(self):
+            super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+            self.auto_on_source = 0
+            self.auto_on_deadline = None
+            self.held = False
+            self.tick = 0
+
+        def do_startup(self):
+            Adw.Application.do_startup(self)
+            for name, cb in (("about", self.on_about), ("quit", lambda *_: self.quit())):
+                act = Gio.SimpleAction.new(name, None)
+                act.connect("activate", cb)
+                self.add_action(act)
+            self.set_accels_for_action("app.quit", ["<Ctrl>q"])
+            self.set_accels_for_action("window.close", ["<Ctrl>w"])
+
+        def do_activate(self):
+            win = self.get_active_window() or Window(self)
+            win.present()
+            if not self.tick:
+                self.tick = GLib.timeout_add_seconds(1, self.on_tick)
+
+        def on_tick(self):
+            win = self.get_active_window()
+            if win and not win.busy:
+                win.refresh()
+            return GLib.SOURCE_CONTINUE
+
+        def on_about(self, *_):
+            Adw.AboutDialog(
+                application_name=APP_NAME, application_icon=APP_ID, version=VERSION,
+                developer_name="Hafij", license_type=Gtk.License.GPL_3_0,
+                comments="Turn the laptop's built-in keyboard on or off, for example "
+                         "when an external keyboard rests on top of it.",
+            ).present(self.get_active_window())
+
+        # -- helper
+
+        def run_helper(self, mode, done):
+            try:
+                proc = Gio.Subprocess.new(
+                    helper_argv(mode),
+                    Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+            except GLib.Error as e:
+                done(False, e.message)
+                return
+
+            def finished(p, res):
+                try:
+                    _, _out, err = p.communicate_utf8_finish(res)
+                except GLib.Error as e:
+                    done(False, e.message)
+                    return
+                status = p.get_exit_status()
+                done(status == 0, explain_failure(status, err))
+
+            proc.communicate_utf8_async(None, None, finished)
+
+        # -- auto re-enable
+
+        def schedule_auto_on(self, seconds):
+            self.cancel_auto_on()
+            self.auto_on_deadline = time.monotonic() + seconds
+            self.auto_on_source = GLib.timeout_add_seconds(seconds, self.on_auto_on)
+
+        def cancel_auto_on(self):
+            if self.auto_on_source:
+                GLib.source_remove(self.auto_on_source)
+            self.auto_on_source = 0
+            self.auto_on_deadline = None
+            self.release_hold()
+
+        def auto_on_remaining(self):
+            if self.auto_on_deadline is None:
+                return None
+            return max(0, int(self.auto_on_deadline - time.monotonic() + 0.5))
+
+        def on_auto_on(self):
+            self.auto_on_source = 0
+            self.auto_on_deadline = None
+
+            def done(ok, msg):
+                note = Gio.Notification.new(APP_NAME)
+                note.set_body("Internal keyboard is back on" if ok else msg)
+                self.send_notification("auto-on", note)
+                win = self.get_active_window()
+                if win:
+                    win.refresh()
+                self.release_hold()
+
+            self.run_helper("on", done)
+            return GLib.SOURCE_REMOVE
+
+        def hold_until_auto_on(self):
+            if not self.held:
+                self.hold()
+                self.held = True
+
+        def release_hold(self):
+            if self.held:
+                self.held = False
+                self.release()
+
+    return App().run([sys.argv[0]])
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and (argv[0] in ("on", "off", "toggle", "status", "watchdog")
+                 or argv[0] in ("--version", "--help", "-h")):
+        return cli(argv)
+    return gui(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

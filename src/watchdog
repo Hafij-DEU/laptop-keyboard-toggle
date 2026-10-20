@@ -1,0 +1,169 @@
+#!/usr/bin/python3 -I
+"""Stuck-Shift watchdog for the built-in keyboard (runs as root via systemd).
+
+Some laptop keyboards lose the "Shift released" scancode, so the kernel keeps
+Shift held down forever. When Shift has been down for a while and the keyboard
+has sent nothing at all, this resets the keyboard (inhibit, then uninhibit),
+which makes the kernel release every held key. If Shift sticks again soon
+after, the keyboard is left off and the user is notified.
+"""
+import fcntl
+import glob
+import os
+import pwd
+import re
+import subprocess
+import sys
+import time
+
+SYSFS = os.environ.get("TIK_SYSFS", "/sys/class/input")
+POLL = 0.5
+STUCK_AFTER = float(os.environ.get("TIK_STUCK_AFTER", "4"))   # seconds Shift down and keyboard silent
+REPEAT_WINDOW = float(os.environ.get("TIK_REPEAT_WINDOW", "60"))  # stuck again within this -> keep off
+WATCH_KEYS = {42: "Left Shift", 54: "Right Shift"}
+INTERNAL_NAMES = ("AT Translated Set 2 keyboard", "AT Raw Set 2 keyboard")
+KEY_MAX = 0x2FF
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def find_internal():
+    for d in sorted(glob.glob(os.path.join(SYSFS, "input*"))):
+        if not os.path.exists(os.path.join(d, "inhibited")):
+            continue
+        if "/virtual/" in os.path.realpath(d):
+            continue
+        if (_read(os.path.join(d, "phys")).startswith("isa0060/serio0")
+                or _read(os.path.join(d, "name")) in INTERNAL_NAMES):
+            return d
+    return None
+
+
+def event_node(input_dir):
+    for e in glob.glob(os.path.join(input_dir, "event*")):
+        return "/dev/input/" + os.path.basename(e)
+    return None
+
+
+def held_keys(fd):
+    """Codes the kernel currently considers pressed (EVIOCGKEY)."""
+    size = KEY_MAX // 8 + 1
+    req = (2 << 30) | (size << 16) | (ord("E") << 8) | 0x18
+    buf = bytearray(size)
+    fcntl.ioctl(fd, req, buf)
+    return {i * 8 + b for i, byte in enumerate(buf) if byte for b in range(8) if byte >> b & 1}
+
+
+def kbd_irq_count():
+    """Total i8042 keyboard interrupts; changes whenever the keyboard sends anything."""
+    try:
+        with open("/proc/interrupts") as f:
+            for line in f:
+                if line.rstrip().endswith("i8042") and re.match(r"\s*1:", line):
+                    return sum(int(x) for x in line.split()[1:] if x.isdigit())
+    except OSError:
+        pass
+    return None
+
+
+def notify(body):
+    """Show a desktop notification to every logged-in graphical user."""
+    for bus in glob.glob("/run/user/*/bus"):
+        uid = int(bus.split("/")[3])
+        if uid < 1000:
+            continue
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            continue
+        subprocess.run(
+            ["runuser", "-u", user, "--", "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path={bus}",
+             "notify-send", "-a", "Toggle Internal Keyboard", "-i", "input-keyboard",
+             "Toggle Internal Keyboard", body],
+            check=False, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def set_inhibited(d, value):
+    with open(os.path.join(d, "inhibited"), "w") as f:
+        f.write("1" if value else "0")
+
+
+def run():
+    last_reset = None
+    down_since = None
+    last_irq = kbd_irq_count()
+    quiet_since = time.monotonic()
+    fd = None
+    dev = None
+
+    while True:
+        time.sleep(POLL)
+        now = time.monotonic()
+
+        d = find_internal()
+        if d != dev:
+            if fd is not None:
+                os.close(fd)
+                fd = None
+            dev = d
+            node = event_node(d) if d else None
+            if node:
+                try:
+                    fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
+                    log(f"watching {_read(os.path.join(d, 'name'))} ({node})")
+                except OSError as e:
+                    log(f"cannot open {node}: {e}")
+        if fd is None or _read(os.path.join(dev, "inhibited")) == "1":
+            down_since = None
+            continue
+
+        irq = kbd_irq_count()
+        if irq != last_irq:
+            last_irq = irq
+            quiet_since = now
+
+        try:
+            stuck = held_keys(fd) & WATCH_KEYS.keys()
+        except OSError:
+            dev = None  # device went away; reopen next round
+            continue
+        if not stuck:
+            down_since = None
+            continue
+        if down_since is None:
+            down_since = now
+            continue
+        if now - down_since < STUCK_AFTER or now - quiet_since < STUCK_AFTER:
+            continue
+
+        names = ", ".join(WATCH_KEYS[k] for k in sorted(stuck))
+        if last_reset is not None and now - last_reset < REPEAT_WINDOW:
+            set_inhibited(dev, True)
+            log(f"{names} stuck again within {REPEAT_WINDOW:.0f}s: keyboard turned off")
+            notify(f"{names} keeps getting stuck, so the built-in keyboard was turned off. "
+                   "Turn it back on in the app.")
+            last_reset = None
+        else:
+            set_inhibited(dev, True)
+            time.sleep(0.3)
+            set_inhibited(dev, False)
+            last_reset = now
+            log(f"{names} stuck: keyboard reset")
+            notify(f"{names} was stuck. The built-in keyboard was reset.")
+        down_since = None
+
+
+if __name__ == "__main__":
+    if os.geteuid() != 0 and not os.environ.get("TIK_SYSFS"):
+        sys.exit("watchdog must run as root")
+    run()

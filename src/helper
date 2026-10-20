@@ -1,0 +1,40 @@
+#!/bin/bash
+# Root helper for Toggle Internal Keyboard. Run via pkexec.
+# Usage: helper on|off|toggle|watchdog-on|watchdog-off
+# Finds the built-in keyboard by its i8042 (serio) port, so it keeps working
+# when event/input numbers change between boots.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+find_internal() {
+    local d phys name
+    for d in /sys/class/input/input*; do
+        [ -f "$d/inhibited" ] || continue
+        phys=$(cat "$d/phys" 2>/dev/null || true)
+        name=$(cat "$d/name" 2>/dev/null || true)
+        case "$(readlink -f "$d")" in */virtual/*) continue ;; esac
+        if [[ "$phys" == isa0060/serio0* ]] || [[ "$name" == "AT Translated Set 2 keyboard" || "$name" == "AT Raw Set 2 keyboard" ]]; then
+            echo "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+WATCHDOG=toggle-internal-keyboard-watchdog.service
+case "${1:-}" in
+    on|off|toggle) ;;
+    watchdog-on) systemctl enable --now "$WATCHDOG" >/dev/null 2>&1; systemctl is-active "$WATCHDOG"; exit 0 ;;
+    watchdog-off) systemctl disable --now "$WATCHDOG" >/dev/null 2>&1; systemctl is-active "$WATCHDOG" || true; exit 0 ;;
+    *) echo "usage: $0 on|off|toggle|watchdog-on|watchdog-off" >&2; exit 2 ;;
+esac
+
+dev=$(find_internal) || { echo "internal keyboard not found" >&2; exit 3; }
+cur=$(cat "$dev/inhibited")
+case "$1" in
+    on) new=0 ;;
+    off) new=1 ;;
+    toggle) if [ "$cur" = 0 ]; then new=1; else new=0; fi ;;
+esac
+[ "$cur" = "$new" ] || echo "$new" > "$dev/inhibited"
+if [ "$(cat "$dev/inhibited")" = 0 ]; then echo on; else echo off; fi

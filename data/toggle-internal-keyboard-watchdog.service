@@ -1,0 +1,12 @@
+[Unit]
+Description=Reset the built-in keyboard when Shift gets stuck
+After=systemd-udevd.service
+
+[Service]
+ExecStart=/usr/libexec/toggle-internal-keyboard/watchdog
+Restart=on-failure
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
