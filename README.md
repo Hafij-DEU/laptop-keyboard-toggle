@@ -6,6 +6,8 @@ Use it when an external keyboard sits on top of the laptop, while you clean the 
 
 Built with GTK4 and libadwaita for GNOME on Ubuntu/Debian. Once the package is installed, no password is needed.
 
+On Windows, use [ShiftFix](#windows-shiftfix), a small tray app with the same stuck-Shift fix.
+
 ## Features
 
 - **One-click on/off** for the built-in keyboard. External USB and Bluetooth keyboards keep working.
@@ -96,9 +98,36 @@ Removing the package stops and disables the watchdog service. Any keyboard you t
 
 ## Limitations
 
-- **Linux only.** The app depends on Linux sysfs and polkit, so it does not work on Windows.
+- **The on/off toggle is Linux only.** It depends on Linux sysfs and polkit. On Windows, [ShiftFix](#windows-shiftfix) covers the stuck-Shift fix.
 - **Only i8042 keyboards are found.** Some newer laptops connect the keyboard over I²C or USB instead, and those are not detected yet.
 - **Holding Shift alone gets released.** If you hold Shift for more than 4 seconds without pressing any other key, for example Shift-clicking with the mouse, the watchdog releases it.
+
+## Windows (ShiftFix)
+
+`ShiftFix.exe` is the stuck-Shift watchdog for Windows: a 13 KB tray app with nothing to install.
+
+- **Stuck Shift fix:** twice a second it checks whether Windows still reports Left or Right Shift as held. If Shift has been down for 4 seconds and no key has been pressed in that time, it sends a Shift release and shows a notification. A Shift you really hold auto-repeats, so it is left alone.
+- **Stuck again within a minute:** it releases Shift again and warns that the key may be faulty.
+- **Starts with Windows:** turned on at the first run. Switch it off in the tray menu.
+- **Tray menu:** auto-fix on/off (or double-click the icon), **Release Shift now**, **Start with Windows**, open the log (`%LOCALAPPDATA%\ShiftFix\log.txt`).
+
+### Install
+
+- **App Hub for Windows:** install **ShiftFix** from My Apps. App Hub also handles updates.
+- **By hand:** download `ShiftFix.exe` from the [Windows release](https://github.com/Hafij-DEU/laptop-keyboard-toggle/releases?q=windows) and run it. Keep it in a folder it can stay in, because Start with Windows points to that file.
+
+### Build
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\build.ps1
+```
+
+It uses the C# compiler that ships with Windows (.NET Framework 4), so nothing else is needed. The exe is written to `windows\ShiftFix.exe`.
+
+### Differences from Linux
+
+- **No keyboard on/off toggle.** Windows can't turn off a built-in PS/2 keyboard without restarting, so ShiftFix only releases Shift.
+- **Admin windows:** while a window running as administrator is in front, Windows may block the release. Click another window, or use **Release Shift now**.
 
 ## License
 
