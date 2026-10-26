@@ -18,7 +18,7 @@ import time
 
 APP_ID = "io.github.hafij_bge.ToggleInternalKeyboard"
 APP_NAME = "Toggle Internal Keyboard"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 WATCHDOG_UNIT = "toggle-internal-keyboard-watchdog.service"
 HELPER = os.environ.get("TIK_HELPER", "/usr/libexec/toggle-internal-keyboard/helper")
 SYSFS = os.environ.get("TIK_SYSFS", "/sys/class/input")

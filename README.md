@@ -114,7 +114,7 @@ Removing the package stops and disables the watchdog service. Any keyboard you t
 ### Install
 
 - **App Hub for Windows:** install **ShiftFix** from My Apps. App Hub also handles updates.
-- **By hand:** download `ShiftFix.exe` from the [Windows release](https://github.com/Hafij-DEU/laptop-keyboard-toggle/releases?q=windows) and run it. Keep it in a folder it can stay in, because Start with Windows points to that file.
+- **By hand:** download `ShiftFix.exe` from the [latest release](https://github.com/Hafij-DEU/laptop-keyboard-toggle/releases/latest) (next to the Linux `.deb`) and run it. Keep it in a folder it can stay in, because Start with Windows points to that file.
 
 ### Build
 

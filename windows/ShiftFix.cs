@@ -25,7 +25,7 @@ using Microsoft.Win32;
 
 static class ShiftFix
 {
-    public const string Version = "1.0.0";
+    public const string Version = "1.3.0";
     const double StuckAfter = 4.0;      // seconds Shift down and keyboard silent
     const double RepeatWindow = 60.0;   // stuck again within this -> warn
     const int VK_LSHIFT = 0xA0, VK_RSHIFT = 0xA1;
