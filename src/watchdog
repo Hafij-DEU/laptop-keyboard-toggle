@@ -37,8 +37,16 @@ def _read(path):
         return ""
 
 
+def _input_dirs():
+    """input* dirs in numeric order (input2 before input10), same as the app and helper."""
+    def num(p):
+        m = re.search(r"(\d+)$", p)
+        return int(m.group(1)) if m else 0
+    return sorted(glob.glob(os.path.join(SYSFS, "input*")), key=num)
+
+
 def find_internal():
-    for d in sorted(glob.glob(os.path.join(SYSFS, "input*"))):
+    for d in _input_dirs():
         if not os.path.exists(os.path.join(d, "inhibited")):
             continue
         if "/virtual/" in os.path.realpath(d):
@@ -105,6 +113,7 @@ def run():
     quiet_since = time.monotonic()
     fd = None
     dev = None
+    no_irq_logged = False
 
     while True:
         time.sleep(POLL)
@@ -128,6 +137,15 @@ def run():
             continue
 
         irq = kbd_irq_count()
+        if irq is None:
+            # No i8042 line in /proc/interrupts: we can't tell a stuck Shift from a held one,
+            # so never act on "keyboard silent" (fail safe: no surprise resets).
+            if not no_irq_logged:
+                log("no i8042 keyboard interrupt line found; stuck-Shift reset paused")
+                no_irq_logged = True
+            down_since = None
+            continue
+        no_irq_logged = False
         if irq != last_irq:
             last_irq = irq
             quiet_since = now

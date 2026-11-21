@@ -8,7 +8,11 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 find_internal() {
     local d phys name
-    for d in /sys/class/input/input*; do
+    local -a dirs
+    # Numeric order (input2 before input10), same as the app and the watchdog, so status
+    # and on/off always pick the same device when more than one matches.
+    mapfile -t dirs < <(printf '%s\n' /sys/class/input/input* | sort -V)
+    for d in "${dirs[@]}"; do
         [ -f "$d/inhibited" ] || continue
         phys=$(cat "$d/phys" 2>/dev/null || true)
         name=$(cat "$d/name" 2>/dev/null || true)
